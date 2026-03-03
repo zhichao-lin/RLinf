@@ -570,6 +570,82 @@ class Worker(metaclass=WorkerMeta):
 
         return WorkerGroup(cls, args, kwargs)
 
+    @classmethod
+    def attach_to_current_ray_actor(
+        cls: type[WorkerClsType],
+        group_name: str,
+        rank: int,
+        world_size: int,
+        cluster_node_rank: int = 0,
+        node_group_label: Optional[str] = None,
+        accelerator_type: Optional[AcceleratorType] = None,
+        accelerator_model: str = "",
+        local_accelerator_rank: int = -1,
+        node_local_rank: int = 0,
+        node_local_world_size: int = 1,
+        local_hardware_ranks: str = "",
+        isolate_accelerator: Optional[bool] = None,
+        catch_system_failure: Optional[bool] = None,
+    ) -> WorkerClsType:
+        """Attach a Worker instance to the current Ray actor process.
+
+        This helper sets up all required environment variables so that a Worker
+        can be instantiated inside an arbitrary Ray actor (not created via
+        WorkerGroup.create_group().launch) and still obtains full send/recv
+        communication capability.
+
+        It assumes that a Cluster has already been created on the driver side
+        (so that the global managers such as WorkerManager and CollectiveManager
+        are running in the same Ray namespace).
+        """
+        # Ensure we are in the same namespace as the running Cluster / managers.
+        # Cluster() here will either attach to an existing cluster or create a
+        # lightweight view of it in this process.
+        cluster = Cluster()
+        if node_group_label is None:
+            node_group = cluster.get_node_group()
+            assert (
+                node_group is not None
+            ), "Failed to infer node group label when attaching Worker to current Ray actor."
+            node_group_label = node_group.label
+
+        if accelerator_type is None:
+            accelerator_type = AcceleratorType.NO_ACCEL
+
+        from ..manager import WorkerAddress as _WorkerAddress
+
+        worker_address = _WorkerAddress(group_name, rank)
+
+        # Namespace must be set before Worker.__init__ is executed.
+        os.environ["CLUSTER_NAMESPACE"] = Cluster.NAMESPACE
+
+        os.environ.update(
+            {
+                "WORKER_NAME": worker_address.get_name(),
+                "WORLD_SIZE": str(world_size),
+                "RANK": str(rank),
+                "CLUSTER_NODE_RANK": str(cluster_node_rank),
+                "ACCELERATOR_TYPE": str(accelerator_type.value),
+                "ACCELERATOR_MODEL": accelerator_model,
+                "LOCAL_ACCELERATOR_RANK": str(local_accelerator_rank),
+                "NODE_LOCAL_RANK": str(node_local_rank),
+                "NODE_LOCAL_WORLD_SIZE": str(node_local_world_size),
+                "LOCAL_HARDWARE_RANKS": local_hardware_ranks,
+                "NODE_GROUP_LABEL": str(node_group_label),
+                "ISOLATE_ACCELERATOR": (
+                    ("1" if isolate_accelerator else "0")
+                    if isolate_accelerator is not None
+                    else os.environ.get("ISOLATE_ACCELERATOR", "0")
+                ),
+            }
+        )
+
+        if catch_system_failure is not None:
+            os.environ["CATCH_SYSTEM_FAILURE"] = "1" if catch_system_failure else "0"
+
+        # Now we can safely construct the Worker instance in this Ray actor.
+        return cls()
+
     def send(
         self,
         object: torch.Tensor | list[torch.Tensor] | dict[str, torch.Tensor] | Any,
