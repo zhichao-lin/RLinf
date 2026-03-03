@@ -64,6 +64,7 @@ class MultiChannelProcessGroup:
         self._no_accel_ccl = False
         self._group_name = None
         self._group_info = group_info
+        self._logged_backend_keys: set[tuple[str, str, int]] = set()
 
         # Check if all workers have the same accelerator type
         accel_type = group_info.workers[0].accelerator_type
@@ -105,6 +106,31 @@ class MultiChannelProcessGroup:
             None for _ in range(num_channels)
         ]
 
+    def _log_backend_once(
+        self,
+        *,
+        op: str,
+        device: str,
+        channel_id: int,
+        backend: str,
+        note: Optional[str] = None,
+    ):
+        """Log backend selection once per (op, device, channel_id)."""
+        if self._logger is None:
+            return
+        key = (op, device, channel_id)
+        if key in self._logged_backend_keys:
+            return
+        self._logged_backend_keys.add(key)
+
+        msg = (
+            f"[Collective:{self._group_name}] {op} uses backend={backend} "
+            f"(device={device}, channel={channel_id}, rank={self._cur_rank}, peer={self._peer_rank})"
+        )
+        if note:
+            msg += f" note={note}"
+        self._logger.debug(msg)
+
     @property
     def is_initialized(self) -> bool:
         """Check if the MultiChannelProcessGroup is initialized."""
@@ -131,6 +157,17 @@ class MultiChannelProcessGroup:
         from ..cluster import Cluster, ClusterEnvVar
 
         self._group_name = group_name
+        if self._logger is not None:
+            if self._no_accel_ccl:
+                self._logger.debug(
+                    f"[Collective:{group_name}] accelerator CCL disabled; using GLOO for all traffic "
+                    f"(accel_type={self._accel_type}, accel_backend={self._accel_ccl_backend})"
+                )
+            else:
+                self._logger.debug(
+                    f"[Collective:{group_name}] accelerator CCL enabled "
+                    f"(accel_type={self._accel_type}, accel_backend={self._accel_ccl_backend})"
+                )
         try:
             # Set default timeout to 180 minutes
             timeout = int(Cluster.get_sys_env_var(ClusterEnvVar.TIMEOUT, "180"))
@@ -311,6 +348,24 @@ class MultiChannelProcessGroup:
         if self._no_accel_ccl and device == CollectiveGroup.ACCEL:
             # Transfer to CPU if accel CCL is not available
             tensor = tensor.to("cpu")
+            self._log_backend_once(
+                op="send",
+                device=device,
+                channel_id=channel_id,
+                backend="gloo",
+                note="accel_ccl_unavailable_fallback_to_cpu",
+            )
+        elif device == CollectiveGroup.ACCEL and not self._no_accel_ccl:
+            self._log_backend_once(
+                op="send",
+                device=device,
+                channel_id=channel_id,
+                backend=str(self._accel_ccl_backend),
+            )
+        else:
+            self._log_backend_once(
+                op="send", device=device, channel_id=channel_id, backend="gloo"
+            )
         group = (
             self._send_accel_ccl_process_groups[channel_id]
             if device == CollectiveGroup.ACCEL and not self._no_accel_ccl
@@ -349,6 +404,24 @@ class MultiChannelProcessGroup:
         if self._no_accel_ccl and device == CollectiveGroup.ACCEL:
             # Create a new tensor on CPU if accel CCL is not available
             recv_tensor = torch.empty_like(tensor, device="cpu")
+            self._log_backend_once(
+                op="recv",
+                device=device,
+                channel_id=channel_id,
+                backend="gloo",
+                note="accel_ccl_unavailable_fallback_to_cpu",
+            )
+        elif device == CollectiveGroup.ACCEL and not self._no_accel_ccl:
+            self._log_backend_once(
+                op="recv",
+                device=device,
+                channel_id=channel_id,
+                backend=str(self._accel_ccl_backend),
+            )
+        else:
+            self._log_backend_once(
+                op="recv", device=device, channel_id=channel_id, backend="gloo"
+            )
         group = (
             self._recv_accel_ccl_process_groups[channel_id]
             if device == CollectiveGroup.ACCEL and not self._no_accel_ccl
@@ -390,6 +463,24 @@ class MultiChannelProcessGroup:
             else:
                 # Create a new tensor on CPU if accel CCL is not available for non-src ranks
                 broadcast_tensor = torch.empty_like(tensor, device="cpu")
+            self._log_backend_once(
+                op="broadcast",
+                device=device,
+                channel_id=channel_id,
+                backend="gloo",
+                note="accel_ccl_unavailable_fallback_to_cpu",
+            )
+        elif device == CollectiveGroup.ACCEL and not self._no_accel_ccl:
+            self._log_backend_once(
+                op="broadcast",
+                device=device,
+                channel_id=channel_id,
+                backend=str(self._accel_ccl_backend),
+            )
+        else:
+            self._log_backend_once(
+                op="broadcast", device=device, channel_id=channel_id, backend="gloo"
+            )
 
         group = (
             self._collective_accel_ccl_process_groups[channel_id]
