@@ -116,7 +116,7 @@ class Cluster:
         return cls._instance
 
     def __init__(
-        self, num_nodes: Optional[int] = None, cluster_cfg: Optional[DictConfig] = None
+        self, num_nodes: Optional[int] = None, cluster_cfg: Optional[DictConfig] = None, ray_init_kwargs: Optional[dict] = None,
     ):
         """Initialize the cluster.
 
@@ -131,7 +131,7 @@ class Cluster:
             self._ray_instance_count = 0
             while True:
                 try:
-                    self._init_and_launch_managers(num_nodes, cluster_cfg)
+                    self._init_and_launch_managers(num_nodes, cluster_cfg, ray_init_kwargs)
                     break
                 except Cluster.NamespaceConflictError:
                     # Switch the namespace when multiple ray instances are created in the same node
@@ -167,7 +167,7 @@ class Cluster:
         self._logger.addHandler(handler)
 
     def _init_and_launch_managers(
-        self, num_nodes: int, cluster_cfg: Optional[DictConfig]
+        self, num_nodes: int, cluster_cfg: Optional[DictConfig], ray_init_kwargs: Optional[dict] = None,
     ):
         if ray.is_initialized():
             if self._ray_instance_count > 0:
@@ -212,11 +212,13 @@ class Cluster:
                 address="auto",
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
             )
         except ConnectionError:
             ray.init(
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
             )
 
         # If num_nodes is 0, infer the number of nodes from the connected Ray cluster
