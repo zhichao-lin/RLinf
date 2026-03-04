@@ -611,33 +611,48 @@ class Worker(metaclass=WorkerMeta):
         if accelerator_type is None:
             accelerator_type = AcceleratorType.NO_ACCEL
 
-        from ..manager import WorkerAddress as _WorkerAddress
-
-        worker_address = _WorkerAddress(group_name, rank)
+        worker_address = WorkerAddress(group_name, rank)
 
         # Namespace must be set before Worker.__init__ is executed.
         os.environ["CLUSTER_NAMESPACE"] = Cluster.NAMESPACE
 
-        os.environ.update(
-            {
-                "WORKER_NAME": worker_address.get_name(),
-                "WORLD_SIZE": str(world_size),
-                "RANK": str(rank),
-                "CLUSTER_NODE_RANK": str(cluster_node_rank),
-                "ACCELERATOR_TYPE": str(accelerator_type.value),
-                "ACCELERATOR_MODEL": accelerator_model,
-                "LOCAL_ACCELERATOR_RANK": str(local_accelerator_rank),
-                "NODE_LOCAL_RANK": str(node_local_rank),
-                "NODE_LOCAL_WORLD_SIZE": str(node_local_world_size),
-                "LOCAL_HARDWARE_RANKS": local_hardware_ranks,
-                "NODE_GROUP_LABEL": str(node_group_label),
-                "ISOLATE_ACCELERATOR": (
-                    ("1" if isolate_accelerator else "0")
-                    if isolate_accelerator is not None
-                    else os.environ.get("ISOLATE_ACCELERATOR", "0")
-                ),
-            }
-        )
+        # Only set core distributed envs if they are not already configured
+        # by the outer Ray actor. This allows users to preconfigure
+        # WORLD_SIZE / RANK / LOCAL_WORLD_SIZE / LOCAL_RANK, etc.
+        env_defaults: dict[str, str] = {
+            "WORKER_NAME": worker_address.get_name(),
+            "WORLD_SIZE": str(world_size),
+            "RANK": str(rank),
+            "CLUSTER_NODE_RANK": str(cluster_node_rank),
+            "ACCELERATOR_TYPE": str(accelerator_type.value),
+            "ACCELERATOR_MODEL": accelerator_model,
+            "LOCAL_ACCELERATOR_RANK": str(local_accelerator_rank),
+            "NODE_LOCAL_RANK": str(node_local_rank),
+            "NODE_LOCAL_WORLD_SIZE": str(node_local_world_size),
+            "LOCAL_HARDWARE_RANKS": local_hardware_ranks,
+            "NODE_GROUP_LABEL": str(node_group_label),
+            "ISOLATE_ACCELERATOR": (
+                ("1" if isolate_accelerator else "0")
+                if isolate_accelerator is not None
+                else os.environ.get("ISOLATE_ACCELERATOR", "0")
+            ),
+        }
+
+        # These variables should not be overridden if the user has already
+        # configured them before creating the RLinf Worker.
+        user_controlled_keys = {
+            "WORLD_SIZE",
+            "RANK",
+            "LOCAL_WORLD_SIZE",
+            "LOCAL_RANK",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+        }
+
+        for key, value in env_defaults.items():
+            if key in user_controlled_keys and key in os.environ:
+                continue
+            os.environ[key] = value
 
         if catch_system_failure is not None:
             os.environ["CATCH_SYSTEM_FAILURE"] = "1" if catch_system_failure else "0"
@@ -1098,20 +1113,28 @@ class Worker(metaclass=WorkerMeta):
 
     def _setup_local_rank_world_size(self):
         if self._is_ray_actor:
-            if os.environ.get("ISOLATE_ACCELERATOR", "0") == "1":
-                # Ray limits the number of accelerators per worker to 1, so when calling torch.cuda.set_device(), we must ensure that 0 is passed as the local rank.
-                os.environ["LOCAL_RANK"] = "0"
-                os.environ["LOCAL_WORLD_SIZE"] = "1"
-                self._isolate_gpu = True
+            # 如果外部已经设置了 LOCAL_RANK / LOCAL_WORLD_SIZE，则尊重外部配置，避免修改。
+            if "LOCAL_RANK" in os.environ and "LOCAL_WORLD_SIZE" in os.environ:
+                self._local_rank = int(os.environ["LOCAL_RANK"])
+                self._local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+                self._isolate_gpu = os.environ.get("ISOLATE_ACCELERATOR", "0") == "1"
             else:
-                os.environ["LOCAL_RANK"] = str(
-                    self._local_accelerator_rank
-                )  # Must use the actual device ID
-                os.environ["LOCAL_WORLD_SIZE"] = str(self._node_local_world_size)
-                self._isolate_gpu = False
+                if os.environ.get("ISOLATE_ACCELERATOR", "0") == "1":
+                    # Ray limits the number of accelerators per worker to 1, so when
+                    # calling torch.cuda.set_device(), we must ensure that 0 is passed
+                    # as the local rank.
+                    os.environ["LOCAL_RANK"] = "0"
+                    os.environ["LOCAL_WORLD_SIZE"] = "1"
+                    self._isolate_gpu = True
+                else:
+                    os.environ["LOCAL_RANK"] = str(
+                        self._local_accelerator_rank
+                    )  # Must use the actual device ID
+                    os.environ["LOCAL_WORLD_SIZE"] = str(self._node_local_world_size)
+                    self._isolate_gpu = False
 
-            self._local_rank = int(os.environ["LOCAL_RANK"])
-            self._local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+                self._local_rank = int(os.environ["LOCAL_RANK"])
+                self._local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
         else:
             # These are not set for non-Ray workers
             self._local_rank = -1
@@ -1137,8 +1160,18 @@ class Worker(metaclass=WorkerMeta):
                     )
             self._master_address = worker_info.node_ip
             self._master_port = worker_info.node_port
-            os.environ["MASTER_ADDR"] = self._master_address
-            os.environ["MASTER_PORT"] = str(self._master_port)
+            if "MASTER_ADDR" not in os.environ and "MASTER_PORT" not in os.environ:
+                os.environ["MASTER_ADDR"] = self._master_address
+                os.environ["MASTER_PORT"] = str(self._master_port)
+            else:
+                if os.environ["MASTER_ADDR"] != self._master_address:
+                    raise ValueError(
+                        f"MASTER_ADDR is already set to {os.environ['MASTER_ADDR']}, conflicting with {self._master_address}"
+                    )
+                if os.environ["MASTER_PORT"] != str(self._master_port):
+                    raise ValueError(
+                        f"MASTER_PORT is already set to {os.environ['MASTER_PORT']}, conflicting with {self._master_port}"
+                    )
 
     def _setup_accelerator_info(self) -> int:
         cluster = Cluster()
@@ -1303,7 +1336,20 @@ class Worker(metaclass=WorkerMeta):
             self._actor = ray.get_actor(self._worker_name, namespace=Cluster.NAMESPACE)
 
         node_ip = ray.util.get_node_ip_address()
-        node_port = self.acquire_free_port()
+
+        if self._is_ray_actor and self._rank == 0:
+            env_master_addr = os.environ.get("MASTER_ADDR", None)
+            env_master_port = os.environ.get("MASTER_PORT", None)
+            if env_master_addr is not None and env_master_port is not None:
+                if env_master_addr != node_ip:
+                    raise ValueError(
+                        f"MASTER_ADDR is already set to {env_master_addr}, conflicting with {node_ip}"
+                    )
+                node_port = int(env_master_port)
+            else:
+                node_port = self.acquire_free_port()
+        else:
+            node_port = self.acquire_free_port()
 
         from ..manager import WorkerInfo
 
