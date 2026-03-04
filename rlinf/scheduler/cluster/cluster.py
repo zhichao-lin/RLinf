@@ -121,6 +121,7 @@ class Cluster:
         num_nodes: Optional[int] = None,
         cluster_cfg: Optional[DictConfig] = None,
         distributed_log_dir: Optional[str] = None,
+        ray_init_kwargs: Optional[dict] = None,
     ):
         """Initialize the cluster.
 
@@ -138,7 +139,7 @@ class Cluster:
             while True:
                 try:
                     self._init_and_launch_managers(
-                        num_nodes, cluster_cfg, distributed_log_dir
+                        num_nodes, cluster_cfg, distributed_log_dir, ray_init_kwargs
                     )
                     break
                 except Cluster.NamespaceConflictError:
@@ -182,6 +183,7 @@ class Cluster:
         num_nodes: int,
         cluster_cfg: Optional[DictConfig],
         distributed_log_dir: Optional[str],
+        ray_init_kwargs: Optional[dict] = None,
     ):
         if ray.is_initialized():
             if self._ray_instance_count > 0:
@@ -226,11 +228,13 @@ class Cluster:
                 address="auto",
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
             )
         except ConnectionError:
             ray.init(
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
             )
 
         # Ray log collector
