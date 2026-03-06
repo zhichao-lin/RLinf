@@ -1365,6 +1365,9 @@ class Worker(metaclass=WorkerMeta):
                         f"MASTER_ADDR is already set to {env_master_addr}, conflicting with {node_ip}"
                     )
                 node_port = int(env_master_port)
+                success = self._port_lock.acquire(node_port)
+                if not success:
+                    raise RuntimeError(f"MASTER_PORT {node_port} is unavailable")
             else:
                 node_port = self.acquire_free_port()
         else:
