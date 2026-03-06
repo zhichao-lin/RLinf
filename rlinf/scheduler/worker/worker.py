@@ -1154,14 +1154,18 @@ class Worker(metaclass=WorkerMeta):
                     )
             self._master_address = worker_info.node_ip
             self._master_port = worker_info.node_port
-            if "MASTER_ADDR" not in os.environ and "MASTER_PORT" not in os.environ:
+
+            if "MASTER_ADDR" not in os.environ:
                 os.environ["MASTER_ADDR"] = self._master_address
-                os.environ["MASTER_PORT"] = str(self._master_port)
             else:
                 if os.environ["MASTER_ADDR"] != self._master_address:
                     raise ValueError(
                         f"MASTER_ADDR is already set to {os.environ['MASTER_ADDR']}, conflicting with {self._master_address}"
                     )
+
+            if "MASTER_PORT" not in os.environ:
+                os.environ["MASTER_PORT"] = str(self._master_port)
+            else:
                 if os.environ["MASTER_PORT"] != str(self._master_port):
                     raise ValueError(
                         f"MASTER_PORT is already set to {os.environ['MASTER_PORT']}, conflicting with {self._master_port}"
