@@ -1407,6 +1407,7 @@ class CollectiveGroup:
             peer_tensor_devices_tensor, peer_tensor_devices_tensor_size
         )
 
+        # TODO: if peer_device is available on the current worker, set current_device to peer_device.
         current_device = str(
             Worker.torch_platform.get_device_properties(
                 Worker.torch_platform.current_device()
