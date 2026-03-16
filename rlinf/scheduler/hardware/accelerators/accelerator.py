@@ -27,11 +27,8 @@ class AcceleratorType(str, Enum):
     """Enum representing different types of accelerators."""
 
     NV_GPU = "NV_GPU"
-    AMD_GPU = "AMD_GPU"
-    INTEL_GPU = "INTEL_GPU"
     NPU = "NPU"  # Huawei Ascend
     NO_ACCEL = "NO_ACCEL"
-    MUSA_GPU = "MUSA_GPU"
 
 
 class AcceleratorManager:
@@ -185,7 +182,6 @@ class AcceleratorUtil:
     # the `_new_process_group_helper` functions of `mult_channel_pg` need to be implemented
     CCL_SUPPORT_LIST = [
         AcceleratorType.NV_GPU,
-        AcceleratorType.AMD_GPU,
         AcceleratorType.NPU,
     ]
 

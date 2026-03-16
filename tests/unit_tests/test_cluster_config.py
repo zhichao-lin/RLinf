@@ -23,7 +23,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from rlinf.scheduler import Cluster, ComponentPlacement, NodePlacementStrategy, Worker
 from rlinf.scheduler.cluster.config import ClusterConfig
-from rlinf.scheduler.hardware.robots.franka import FrankaConfig
 
 
 def test_cluster_config_parses_node_group_hardware():
@@ -43,27 +42,6 @@ def test_cluster_config_parses_node_group_hardware():
                         }
                     ],
                 },
-                {
-                    "label": "franka",
-                    "node_ranks": "2,3",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 2,
-                                "robot_ip": "10.10.10.1",
-                                "camera_serials": ["322142001230"],
-                                "disable_validate": True,
-                            },
-                            {
-                                "node_rank": 3,
-                                "robot_ip": "10.10.10.2",
-                                "camera_serials": ["322142001231"],
-                                "disable_validate": True,
-                            },
-                        ],
-                    },
-                },
             ],
         }
     )
@@ -71,7 +49,7 @@ def test_cluster_config_parses_node_group_hardware():
     cluster_cfg = ClusterConfig.from_dict_cfg(config)
 
     assert cluster_cfg.num_nodes == 4
-    assert len(cluster_cfg.node_groups) == 2
+    assert len(cluster_cfg.node_groups) == 1
 
     a800_group = next(
         group for group in cluster_cfg.node_groups if group.label == "a800"
@@ -92,25 +70,6 @@ def test_cluster_config_parses_node_group_hardware():
     )
     assert cluster_cfg.get_node_hw_configs_by_rank(0) == []
 
-    franka_group = next(
-        group for group in cluster_cfg.node_groups if group.label == "franka"
-    )
-    assert franka_group.node_ranks == [2, 3]
-    assert franka_group.hardware_type == "Franka"
-
-    node2_hw = cluster_cfg.get_node_hw_configs_by_rank(2)
-    assert len(node2_hw) == 1
-    assert isinstance(node2_hw[0], FrankaConfig)
-    assert node2_hw[0].robot_ip == "10.10.10.1"
-    assert node2_hw[0].camera_serials == ["322142001230"]
-
-    node3_hw = cluster_cfg.get_node_hw_configs_by_rank(3)
-    assert len(node3_hw) == 1
-    assert isinstance(node3_hw[0], FrankaConfig)
-    assert node3_hw[0].robot_ip == "10.10.10.2"
-
-    assert cluster_cfg.get_node_labels_by_rank(2) == ["franka"]
-    assert cluster_cfg.get_node_labels_by_rank(3) == ["franka"]
     assert cluster_cfg.get_node_labels_by_rank(1) == ["a800"]
     assert cluster_cfg.get_node_labels_by_rank(99) == []
 
@@ -170,81 +129,6 @@ def test_cluster_config_rejects_node_rank_out_of_range():
         ClusterConfig.from_dict_cfg(config)
 
 
-def test_cluster_config_duplicate_hardware_type_same_node():
-    config = DictConfig(
-        {
-            "num_nodes": 2,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "franka_a",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 0,
-                                "robot_ip": "10.0.0.1",
-                                "disable_validate": True,
-                            }
-                        ],
-                    },
-                },
-                {
-                    "label": "franka_b",
-                    "node_ranks": "0,1",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 0,
-                                "robot_ip": "10.0.0.2",
-                                "disable_validate": True,
-                            }
-                        ],
-                    },
-                },
-            ],
-        }
-    )
-
-    with pytest.raises(AssertionError, match="Cannot have multiple hardware configs"):
-        ClusterConfig.from_dict_cfg(config)
-
-
-def test_cluster_config_duplicate_hardware_entries_disallowed():
-    config = DictConfig(
-        {
-            "num_nodes": 1,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "robots",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 0,
-                                "robot_ip": "10.0.0.1",
-                                "disable_validate": True,
-                            },
-                            {
-                                "node_rank": 0,
-                                "robot_ip": "10.0.0.1",
-                                "disable_validate": True,
-                            },
-                        ],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(AssertionError, match="Duplicate hardware configs"):
-        ClusterConfig.from_dict_cfg(config)
-
-
 def test_cluster_config_node_group_entry_must_be_mapping():
     config = DictConfig(
         {
@@ -284,80 +168,6 @@ def test_cluster_config_env_var_entry_must_be_mapping():
         ClusterConfig.from_dict_cfg(config)
 
 
-def test_cluster_config_hardware_configs_must_be_mapping():
-    config = DictConfig(
-        {
-            "num_nodes": 1,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "robot",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": ["BAD"],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(
-        AssertionError, match="Each hardware config must be a dictionary"
-    ):
-        ClusterConfig.from_dict_cfg(config)
-
-
-def test_cluster_config_hardware_node_rank_must_be_in_group():
-    config = DictConfig(
-        {
-            "num_nodes": 2,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "franka",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 1,
-                                "robot_ip": "10.0.0.1",
-                                "disable_validate": True,
-                            }
-                        ],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(AssertionError, match="must be within node_ranks"):
-        ClusterConfig.from_dict_cfg(config)
-
-
-def test_cluster_config_unsupported_hardware_type():
-    config = DictConfig(
-        {
-            "num_nodes": 1,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "robot",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "UnknownHardware",
-                        "configs": [],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(ValueError, match="Unsupported hardware type"):
-        ClusterConfig.from_dict_cfg(config)
-
-
 def test_cluster_config_invalid_node_rank_format():
     config = DictConfig(
         {
@@ -373,67 +183,6 @@ def test_cluster_config_invalid_node_rank_format():
     )
 
     with pytest.raises(ValueError, match="Invalid rank format"):
-        ClusterConfig.from_dict_cfg(config)
-
-
-def test_cluster_config_missing_required_hardware_field():
-    config = DictConfig(
-        {
-            "num_nodes": 1,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "robot",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 0,
-                                # Missing robot_ip
-                                "disable_validate": True,
-                            }
-                        ],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(
-        AssertionError, match=r"Missing fields '\['robot_ip'\]' detected"
-    ):
-        ClusterConfig.from_dict_cfg(config)
-
-
-def test_cluster_config_unknown_hardware_field_rejected():
-    config = DictConfig(
-        {
-            "num_nodes": 1,
-            "component_placement": {},
-            "node_groups": [
-                {
-                    "label": "robot",
-                    "node_ranks": "0",
-                    "hardware": {
-                        "type": "Franka",
-                        "configs": [
-                            {
-                                "node_rank": 0,
-                                "robot_ip": "10.0.0.1",
-                                "disable_validate": True,
-                                "unknown_field": 1,
-                            }
-                        ],
-                    },
-                }
-            ],
-        }
-    )
-
-    with pytest.raises(
-        AssertionError, match="Unknown fields '{'unknown_field'}' detected"
-    ):
         ClusterConfig.from_dict_cfg(config)
 
 
@@ -523,78 +272,3 @@ def test_cluster_env_configs_applied_in_worker_launch():
     assert env_values == [env_value]
     assert pythonpath_values[0] is not None
     assert pythonpath_values[0].split(os.pathsep)[0] == str(tests_root)
-
-
-def test_cluster_env_configs_multi_node_group_and_hetero_placement():
-    # Skip if num of GPUs is not 4
-    if torch.cuda.device_count() != 4:
-        pytest.skip("Skipping test because num of GPUs is not 4")
-    _reset_cluster_singleton()
-
-    config = OmegaConf.create(
-        {
-            "cluster": {
-                "num_nodes": 1,
-                "component_placement": {
-                    # gpu has 4 accelerators; franka adds one more hardware rank after them.
-                    # Use ranks 0 (gpu0) and 4 (franka0).
-                    "hetero": {"node_group": "gpu,franka", "placement": "0,4"}
-                },
-                "node_groups": [
-                    {
-                        "label": "gpu",
-                        "node_ranks": "0",
-                        "env_configs": [
-                            {
-                                "node_ranks": "0",
-                                "python_interpreter_path": sys.executable,
-                                "env_vars": [{"GPU_ENV": "1"}],
-                            }
-                        ],
-                    },
-                    {
-                        "label": "franka",
-                        "node_ranks": "0",
-                        "hardware": {
-                            "type": "Franka",
-                            "configs": [
-                                {
-                                    "node_rank": 0,
-                                    "robot_ip": "127.0.0.1",
-                                    "disable_validate": True,
-                                }
-                            ],
-                        },
-                        "env_configs": [
-                            {
-                                "node_ranks": "0",
-                                "python_interpreter_path": sys.executable,
-                                "env_vars": [{"FRANKA_ENV": "1"}],
-                            }
-                        ],
-                    },
-                ],
-            }
-        }
-    )
-
-    cluster = Cluster(cluster_cfg=config.cluster)
-    try:
-        placement = ComponentPlacement(config, cluster)
-        strategy = placement.get_strategy("hetero")
-        placements = strategy.get_placement(cluster)
-
-        assert len(placements) == 2
-        labels = [p.node_group_label for p in placements]
-        assert set(labels) == {"gpu", "franka"}
-
-        gpu_group = cluster.get_node_group("gpu")
-        franka_group = cluster.get_node_group("franka")
-        assert gpu_group.get_node_env_vars(0) == {"GPU_ENV": "1"}
-        assert franka_group.get_node_env_vars(0) == {"FRANKA_ENV": "1"}
-        assert gpu_group.get_node_python_interpreter_path(0) == sys.executable
-        assert franka_group.get_node_python_interpreter_path(0) == sys.executable
-    finally:
-        if ray.is_initialized():
-            ray.shutdown()
-        _reset_cluster_singleton()
