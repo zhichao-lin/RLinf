@@ -14,8 +14,11 @@
 
 import asyncio
 import gc
+import queue
+import threading
+from time import monotonic as time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from ..worker import Worker, WorkerAddress
 from .channel import DEFAULT_KEY
@@ -70,19 +73,63 @@ class PeekQueue(asyncio.Queue):
         return list(self._queue)
 
 
+class PeekQueueThreadSafe(queue.Queue):
+    """A thread-safe queue that allows peeking at the next item without removing it."""
+
+    def __init__(self, maxsize=0):
+        """Initialize the PeekQueueThreadSafe.
+
+        Args:
+            maxsize (int): The maximum size of the queue. Defaults to 0 (unbounded).
+
+        """
+        super().__init__(maxsize)
+
+    def peek(self, block: bool = True, timeout: Optional[float] = None) -> Any:
+        """Peek at the next item in the queue without removing it."""
+        with self.not_empty:
+            if not block:
+                if not self._qsize():
+                    raise queue.Empty
+            elif timeout is None:
+                while not self._qsize():
+                    self.not_empty.wait()
+            elif timeout < 0:
+                raise ValueError("'timeout' must be a non-negative number")
+            else:
+                endtime = time() + timeout
+                while not self._qsize():
+                    remaining = endtime - time()
+                    if remaining <= 0.0:
+                        raise queue.Empty
+                    self.not_empty.wait(remaining)
+
+            return self.queue[0]
+
+    def peek_all(self):
+        """Peek at all items in the queue without removing them."""
+        with self.mutex:
+            return list(self.queue)
+
+
 class LocalChannel:
     """A local channel that holds the data in the current process, which cannot be connected by other workers."""
 
-    def __init__(self, maxsize: int = 0):
+    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
         """Initialize the LocalChannel with a maximum size for the queue.
 
         Args:
             maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
+            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
 
         """
-        self._queue_map: dict[str, PeekQueue] = {}
+        self._queue_map: dict[Any, PeekQueue] = {}
 
-        self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
+        if keys is not None:
+            for key in keys:
+                self._queue_map[key] = PeekQueue(maxsize=maxsize)
+        else:
+            self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
 
     def create_queue(self, key: Any, maxsize: int = 0):
         """Create a new queue in the channel. No effect if a queue with the same name already exists.
@@ -139,6 +186,12 @@ class LocalChannel:
         if key not in self._queue_map:
             return self._queue_map[DEFAULT_KEY].maxsize
         return self._queue_map[key].maxsize
+    
+    def get_keys(self) -> list[Any]:
+        """Get the keys of the channel.
+
+        """
+        return list(self._queue_map.keys())
 
     def put(
         self,
@@ -186,7 +239,7 @@ class LocalChannel:
             weighted_item: WeightedItem = self._queue_map[key].get_nowait()
         return weighted_item.item
 
-    async def get_batch(
+    def get_batch(
         self,
         target_weight: int,
         key: Any = DEFAULT_KEY,
@@ -227,22 +280,210 @@ class LocalChannel:
         return self._queue_map[key].peek_all()
 
 
+class LocalChannelThreadSafe:
+    """A thread-safe local channel based on queue.Queue for multi-threaded use."""
+
+    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
+        """Initialize the thread-safe LocalChannel with a maximum size for the queue.
+
+        Args:
+            maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
+            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
+
+        """
+        self._queue_map: dict[Any, PeekQueueThreadSafe] = {}
+        self._default_maxsize = maxsize
+        self._lock = threading.Lock()
+
+        if keys is not None:
+            for key in keys:
+                self._queue_map[key] = PeekQueueThreadSafe(maxsize=maxsize)
+        else:
+            self._queue_map[DEFAULT_KEY] = PeekQueueThreadSafe(maxsize=maxsize)
+
+    def create_queue(self, key: Any, maxsize: int | None = None):
+        """Create a new queue in the channel. No effect if a queue with the same name already exists.
+
+        Args:
+            key (Any): The key of the queue to create.
+            maxsize (int): The maximum size of the queue. Defaults to None.
+
+        """
+        with self._lock:
+            if key in self._queue_map:
+                return
+            if maxsize is None:
+                maxsize = self._default_maxsize
+            self._queue_map[key] = PeekQueueThreadSafe(maxsize=maxsize)
+
+    def _get_queue(self, key: Any):
+        """Get the queue for the given key. If the queue does not exist, create it with the default maxsize.
+
+        Args:
+            key (Any): The key of the queue to get.
+
+        """
+        with self._lock:
+            if key not in self._queue_map:
+                # use same maxsize as default
+                self._queue_map[key] = PeekQueueThreadSafe(maxsize=self._default_maxsize)
+            return self._queue_map[key]
+
+    def qsize(self, key: Any = DEFAULT_KEY) -> int:
+        """Get the size of the channel queue.
+
+        Args:
+            key (Any): The key of the queue to check.
+
+        """
+        if key not in self._queue_map:
+            return 0
+        return self._get_queue(key).qsize()
+
+    def empty(self, key: Any = DEFAULT_KEY) -> bool:
+        """Check if the channel queue is empty.
+
+        Args:
+            key (Any): The key of the queue to check.
+
+        """
+        if key not in self._queue_map:
+            return True
+        return self._get_queue(key).empty()
+
+    def full(self, key: Any = DEFAULT_KEY) -> bool:
+        """Check if the channel queue is full.
+
+        Args:
+            key (Any): The key of the queue to check.
+
+        """
+        if key not in self._queue_map:
+            return False
+        return self._get_queue(key).full()
+
+    def maxsize(self, key: Any = DEFAULT_KEY) -> int:
+        """Get the maximum size of the channel queue.
+
+        Args:
+            key (Any): The key of the queue to check.
+
+        """
+        if key not in self._queue_map:
+            return self._default_maxsize
+        return self._get_queue(key).maxsize
+
+    def get_keys(self) -> list[Any]:
+        """Get the keys of the channel.
+
+        """
+        with self._lock:
+            return list(self._queue_map.keys())
+
+    def put(
+        self,
+        item: Any,
+        weight: int,
+        key: Any = DEFAULT_KEY,
+        nowait: bool = False,
+    ):
+        """Put an item into the channel queue.
+
+        Args:
+            item (Any): The item to be put into the queue.
+            weight (int): The weight of the item to be put into the queue.
+            key (Any): The key to get the item from. A unique identifier for a specific set of items.
+            nowait (bool): If True, directly raise asyncio.QueueFull if the queue is full. Defaults to False.
+
+        """
+        q = self._get_queue(key)
+        item = WeightedItem(weight=weight, item=item)
+        if nowait:
+            q.put_nowait(item)
+        else:
+            q.put(item)
+
+    def get(
+        self,
+        key: Any = DEFAULT_KEY,
+        nowait: bool = False,
+    ) -> Any:
+        """Get an item from the channel queue.
+
+        Args:
+            key (Any): The key to get the item from. A unique identifier for a specific set of items.
+            nowait (bool): If True, directly raise asyncio.QueueEmpty if the queue is empty. Defaults to False.
+
+        """
+        q = self._get_queue(key)
+        if nowait:
+            weighted_item: WeightedItem = q.get_nowait()
+        else:
+            weighted_item: WeightedItem = q.get()
+        return weighted_item.item
+
+    def get_batch(
+        self,
+        target_weight: int,
+        key: Any = DEFAULT_KEY,
+    ) -> list[Any]:
+        """Get a batch of items from the channel queue based on the batch weight.
+
+        Args:
+            target_weight (int): The target weight for the batch. The batch will contain items until the total weight reaches this value.
+            key (Any): The key to get the item from. A unique identifier for a specific set of items.
+
+        """
+        q = self._get_queue(key)
+        batch: list[Any] = []
+        current_weight = 0
+        items: list[WeightedItem] = q.peek_all()
+        for item in items:
+            if current_weight + item.weight > target_weight:
+                break
+            current_weight += item.weight
+            item: WeightedItem = q.get_nowait()
+            batch.append(item.item)
+            if current_weight >= target_weight:
+                break
+
+        return batch
+
+    def peek_all(self, key: Any = DEFAULT_KEY) -> list[Any]:
+        """Get all items from the channel queue without removing them.
+
+        Args:
+            key (str): The key to get the items from. A unique identifier for a specific set of items.
+
+        Returns:
+            List[Any]: A list of all items in the queue.
+
+        """
+        q = self._get_queue(key)
+        return q.peek_all()
+
+
 class ChannelWorker(Worker):
     """The actual worker that holds the channel."""
 
     MEM_CLEAN_THRESHOLD = 0.4
     MEM_CLEAN_PERIOD_SECONDS = 5
 
-    def __init__(self, maxsize: int = 0):
+    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
         """Initialize the ChannelWorker with a maximum size for the queue.
 
         Args:
             maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
+            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
 
         """
         super().__init__()
-        self._queue_map: dict[str, PeekQueue] = {}
-        self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
+        self._queue_map: dict[Any, PeekQueue] = {}
+        if keys is not None:
+            for key in keys:
+                self._queue_map[key] = PeekQueue(maxsize=maxsize)
+        else:
+            self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
         self._key_to_channel_rank: dict[Any, int] = {}
 
         self._mem_cleaner_task = asyncio.create_task(self._mem_cleaner())
@@ -351,6 +592,12 @@ class ChannelWorker(Worker):
         if key not in self._queue_map:
             return self._queue_map[DEFAULT_KEY].maxsize
         return self._queue_map[key].maxsize
+    
+    def get_keys(self) -> list[Any]:
+        """Get the keys of the channel.
+
+        """
+        return list(self._queue_map.keys())
 
     async def put(
         self,

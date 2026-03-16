@@ -14,6 +14,8 @@
 
 import asyncio
 import uuid
+import copy
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Optional
 
 import ray
@@ -147,6 +149,8 @@ class Channel:
         node_rank: int = 0,
         local: bool = False,
         disable_distributed_log: bool = True,
+        thread_safe: bool = False,
+        keys: Optional[list[Any]] = None,
     ) -> "Channel":
         """Create a new channel with the specified name, node ID, and accelerator ID.
 
@@ -157,18 +161,23 @@ class Channel:
             node_rank (int): The node rank of the current worker. Only valid when distributed is False.
             local (bool): Create the channel for intra-process communication. A local channel cannot be connected by other workers, and its data cannot be shared among different processes.
             disable_distributed_log (bool): Whether to disable distributed log for the channel.
+            thread_safe (bool): Whether to use a thread-safe local channel. Defaults to False.
+            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
 
         Returns:
             Channel: A new instance of the Channel class.
 
         """
-        from .channel_worker import ChannelWorker, LocalChannel
+        from .channel_worker import ChannelWorker, LocalChannel, LocalChannelThreadSafe
 
-        cluster = Cluster()
         channel = cls()
         if local:
             # Local channel does not need to be launched, just create a local channel object
-            local_channel = LocalChannel(maxsize=maxsize)
+            if thread_safe:
+                local_channel = LocalChannelThreadSafe(maxsize=maxsize, keys=keys)
+            else:
+                local_channel = LocalChannel(maxsize=maxsize, keys=keys)
+
             channel._initialize(
                 name,
                 None,
@@ -179,13 +188,14 @@ class Channel:
             )
             return channel
 
+        cluster = Cluster()   
         # Launch one replica per node
         if distributed:
             placement = NodePlacementStrategy(node_ranks=list(range(cluster.num_nodes)))
         else:
             placement = NodePlacementStrategy(node_ranks=[node_rank])
         try:
-            channel_worker_group = ChannelWorker.create_group(maxsize=maxsize).launch(
+            channel_worker_group = ChannelWorker.create_group(maxsize=maxsize, keys=keys).launch(
                 cluster=cluster,
                 name=name,
                 placement_strategy=placement,
@@ -358,12 +368,25 @@ class Channel:
         target_actor = self._get_channel_actor(target_rank)
         return ray.get(target_actor.full.remote(key))
 
+    def get_keys(self) -> list[Any]:
+        """Get the keys of the channel.
+
+        """
+        if self._local_channel is not None:
+            return self._local_channel.get_keys()
+
+        keys_list = ray.get([
+            actor.get_keys.remote() for actor in self._channel_actors_by_rank.values()
+        ])
+        return list(set(chain.from_iterable(keys_list)))
+
     def put(
         self,
         item: Any,
         weight: int = 0,
         key: Any = DEFAULT_KEY,
         async_op: bool = False,
+        deepcopy: bool = False,
     ) -> Optional[AsyncWork]:
         """Put an item into the channel queue.
 
@@ -374,8 +397,9 @@ class Channel:
             When a key is given, the channel will put the item in the queue associated with that key.
             If the queue associated with the key does not exist, it will be created.
             async_op (bool): Whether to perform the operation asynchronously.
-
+            deepcopy (bool): Whether to deepcopy the item. Defaults to True.
         """
+        item = copy.deepcopy(item) if deepcopy else item
         if self._local_channel is not None:
             assert async_op is False, "Local channel does not support async put."
             self._local_channel.put(item, weight, key)
@@ -420,7 +444,7 @@ class Channel:
             else:
                 async_channel_work.wait()
 
-    def put_nowait(self, item: Any, weight: int = 0, key: Any = DEFAULT_KEY):
+    def put_nowait(self, item: Any, weight: int = 0, key: Any = DEFAULT_KEY, deepcopy: bool = False):
         """Put an item into the channel queue without waiting. Raises asyncio.QueueFull if the queue is full.
 
         Args:
@@ -429,11 +453,13 @@ class Channel:
             key (Any): The key to get the item from. A unique identifier for a specific set of items.
             When a key is given, the channel will put the item in the queue associated with that key.
             If the queue associated with the key does not exist, it will be created.
+            deepcopy (bool): Whether to deepcopy the item. Defaults to False.
 
         Raises:
             asyncio.QueueFull: If the queue is full.
 
         """
+        item = copy.deepcopy(item) if deepcopy else item
         if self._local_channel is not None:
             self._local_channel.put(item, weight, key, nowait=True)
             return
