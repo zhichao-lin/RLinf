@@ -150,7 +150,7 @@ class Channel:
         local: bool = False,
         disable_distributed_log: bool = True,
         thread_safe: bool = False,
-        keys: Optional[list[Any]] = None,
+        keys: list[Any] = [DEFAULT_KEY],
     ) -> "Channel":
         """Create a new channel with the specified name, node ID, and accelerator ID.
 
@@ -162,7 +162,7 @@ class Channel:
             local (bool): Create the channel for intra-process communication. A local channel cannot be connected by other workers, and its data cannot be shared among different processes.
             disable_distributed_log (bool): Whether to disable distributed log for the channel.
             thread_safe (bool): Whether to use a thread-safe local channel. Defaults to False.
-            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
+            keys (list[Any]): The keys of the channel. Defaults to [DEFAULT_KEY].
 
         Returns:
             Channel: A new instance of the Channel class.
@@ -379,6 +379,30 @@ class Channel:
             actor.get_keys.remote() for actor in self._channel_actors_by_rank.values()
         ])
         return list(set(chain.from_iterable(keys_list)))
+
+    def remove_keys(self, keys: list[Any]) -> None:
+        """Remove keys from the channel.
+
+        Args:
+            keys (list[Any]): The keys to remove from the channel.
+        """
+        if self._local_channel is not None:
+            self._local_channel.remove_keys(keys)
+            return
+        
+        target_rank_to_keys = {}
+        for key in keys:
+            target_rank = self._get_channel_rank_by_key(key)
+            target_rank_to_keys.setdefault(target_rank, []).append(key)
+
+        remove_tasks = []
+        for target_rank, keys_list in target_rank_to_keys.items():
+            target_actor = self._get_channel_actor(target_rank)
+            remove_tasks.append(target_actor.remove_keys.remote(keys_list))
+        ray.get(remove_tasks)
+
+        for key in keys:
+            self._key_to_channel_rank_cache.pop(key, None)
 
     def put(
         self,

@@ -115,21 +115,18 @@ class PeekQueueThreadSafe(queue.Queue):
 class LocalChannel:
     """A local channel that holds the data in the current process, which cannot be connected by other workers."""
 
-    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
+    def __init__(self, maxsize: int = 0, keys: list[Any] = [DEFAULT_KEY]):
         """Initialize the LocalChannel with a maximum size for the queue.
 
         Args:
             maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
-            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
+            keys (list[Any]): The keys of the channel. Defaults to [DEFAULT_KEY].
 
         """
         self._queue_map: dict[Any, PeekQueue] = {}
 
-        if keys is not None:
-            for key in keys:
-                self._queue_map[key] = PeekQueue(maxsize=maxsize)
-        else:
-            self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
+        for key in keys:
+            self._queue_map[key] = PeekQueue(maxsize=maxsize)
 
     def create_queue(self, key: Any, maxsize: int = 0):
         """Create a new queue in the channel. No effect if a queue with the same name already exists.
@@ -192,6 +189,15 @@ class LocalChannel:
 
         """
         return list(self._queue_map.keys())
+    
+    def remove_keys(self, keys: list[Any]) -> None:
+        """Remove keys from the channel.
+
+        Args:
+            keys (list[Any]): The keys to remove from the channel.
+        """
+        for key in keys:
+            self._queue_map.pop(key, None)
 
     def put(
         self,
@@ -283,23 +289,20 @@ class LocalChannel:
 class LocalChannelThreadSafe:
     """A thread-safe local channel based on queue.Queue for multi-threaded use."""
 
-    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
+    def __init__(self, maxsize: int = 0, keys: list[Any] = [DEFAULT_KEY]):
         """Initialize the thread-safe LocalChannel with a maximum size for the queue.
 
         Args:
             maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
-            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
+            keys (list[Any]): The keys of the channel. Defaults to [DEFAULT_KEY].
 
         """
         self._queue_map: dict[Any, PeekQueueThreadSafe] = {}
         self._default_maxsize = maxsize
         self._lock = threading.Lock()
 
-        if keys is not None:
-            for key in keys:
-                self._queue_map[key] = PeekQueueThreadSafe(maxsize=maxsize)
-        else:
-            self._queue_map[DEFAULT_KEY] = PeekQueueThreadSafe(maxsize=maxsize)
+        for key in keys:
+            self._queue_map[key] = PeekQueueThreadSafe(maxsize=maxsize)
 
     def create_queue(self, key: Any, maxsize: int | None = None):
         """Create a new queue in the channel. No effect if a queue with the same name already exists.
@@ -379,6 +382,16 @@ class LocalChannelThreadSafe:
         """
         with self._lock:
             return list(self._queue_map.keys())
+    
+    def remove_keys(self, keys: list[Any]) -> None:
+        """Remove keys from the channel.
+
+        Args:
+            keys (list[Any]): The keys to remove from the channel.
+        """
+        with self._lock:
+            for key in keys:
+                self._queue_map.pop(key, None)
 
     def put(
         self,
@@ -469,21 +482,18 @@ class ChannelWorker(Worker):
     MEM_CLEAN_THRESHOLD = 0.4
     MEM_CLEAN_PERIOD_SECONDS = 5
 
-    def __init__(self, maxsize: int = 0, keys: Optional[list[Any]] = None):
+    def __init__(self, maxsize: int = 0, keys: list[Any] = [DEFAULT_KEY]):
         """Initialize the ChannelWorker with a maximum size for the queue.
 
         Args:
             maxsize (int): The maximum size of the default channel queue. Defaults to 0 (unbounded).
-            keys (Optional[list[Any]]): The keys of the channel. Defaults to None.
+            keys (list[Any]): The keys of the channel. Defaults to [DEFAULT_KEY].
 
         """
         super().__init__()
         self._queue_map: dict[Any, PeekQueue] = {}
-        if keys is not None:
-            for key in keys:
-                self._queue_map[key] = PeekQueue(maxsize=maxsize)
-        else:
-            self._queue_map[DEFAULT_KEY] = PeekQueue(maxsize=maxsize)
+        for key in keys:
+            self._queue_map[key] = PeekQueue(maxsize=maxsize)
         self._key_to_channel_rank: dict[Any, int] = {}
 
         self._mem_cleaner_task = asyncio.create_task(self._mem_cleaner())
@@ -598,6 +608,16 @@ class ChannelWorker(Worker):
 
         """
         return list(self._queue_map.keys())
+    
+    def remove_keys(self, keys: list[Any]) -> None:
+        """Remove keys from the channel.
+
+        Args:
+            keys (list[Any]): The keys to remove from the channel.
+        """
+        for key in keys:
+            self._queue_map.pop(key, None)
+            self._key_to_channel_rank.pop(key, None)
 
     async def put(
         self,
