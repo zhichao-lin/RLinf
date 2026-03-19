@@ -110,6 +110,24 @@ class PeekQueueThreadSafe(queue.Queue):
         """Peek at all items in the queue without removing them."""
         with self.mutex:
             return list(self.queue)
+    
+    def get_batch(self, target_weight: int):
+        """Pop a batch without copying the whole queue."""
+        batch: list[Any] = []
+        current_weight = 0
+        with self.not_empty:
+            while self._qsize():
+                next_item = self.queue[0]
+                weight = getattr(next_item, "weight", 0)
+                if current_weight + weight > target_weight:
+                    break
+                batch.append(self.queue.popleft())
+                current_weight += weight
+                if current_weight >= target_weight:
+                    break
+            if batch:
+                self.not_full.notify_all()
+        return batch
 
 
 class LocalChannel:
@@ -448,18 +466,10 @@ class LocalChannelThreadSafe:
 
         """
         q = self._get_queue(key)
+        items: list[WeightedItem] = q.get_batch(target_weight)
         batch: list[Any] = []
-        current_weight = 0
-        items: list[WeightedItem] = q.peek_all()
         for item in items:
-            if current_weight + item.weight > target_weight:
-                break
-            current_weight += item.weight
-            item: WeightedItem = q.get_nowait()
             batch.append(item.item)
-            if current_weight >= target_weight:
-                break
-
         return batch
 
     def peek_all(self, key: Any = DEFAULT_KEY) -> list[Any]:
