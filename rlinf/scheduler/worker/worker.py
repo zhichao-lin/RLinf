@@ -513,6 +513,11 @@ class Worker(metaclass=WorkerMeta):
         return self._worker_address
 
     @property
+    def group_name(self) -> str:
+        """Get the name of the worker group."""
+        return self._group_name
+
+    @property
     def worker_info(self) -> "WorkerInfo":
         """Get the WorkerInfo of the worker."""
         return self._worker_info

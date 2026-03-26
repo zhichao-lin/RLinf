@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, TextIO
 
 import torch
+from tensordict import TensorDict, TensorDictBase
 
 # Type for a single tensor field value in a dataclass (used for send/recv).
 TensorFieldValue = (
@@ -32,10 +33,11 @@ TensorFieldValue = (
     | list[torch.Tensor]
     | tuple[torch.Tensor, ...]
     | dict[str, torch.Tensor]
+    | TensorDictBase
 )
-# Metadata for flatten/unflatten: (field_name, 'tensor'|'list'|'tuple'|'dict', None|length|list_of_keys).
+# Metadata for flatten/unflatten: (field_name, 'tensor'|'list'|'tuple'|'dict'|'tensordict', None|length|list_of_keys|dict).
 DataclassTensorFieldsMetadata = list[
-    tuple[str, str, Optional[int] | Optional[list[str]]]
+    tuple[str, str, Optional[int] | Optional[list[str]] | Optional[dict[str, Any]]]
 ]
 
 
@@ -537,6 +539,7 @@ def extract_dataclass_tensor_fields(
         - list[torch.Tensor] (all elements must be tensors)
         - tuple[torch.Tensor, ...] (all elements must be tensors)
         - dict[str, torch.Tensor] (all values must be tensors)
+        - TensorDict (all values must be tensors)
 
     Returns:
         (fields_dict, tensors_list, metadata): fields_dict maps field names to their value(s);
@@ -569,6 +572,19 @@ def extract_dataclass_tensor_fields(
             keys = list(val.keys())
             tensors_list.extend(val[k] for k in keys)
             metadata.append((f.name, "dict", keys))
+        elif isinstance(val, TensorDictBase) and all(
+            isinstance(v, torch.Tensor) for v in val.values()
+        ):
+            result[f.name] = val
+            keys = list(val.keys())
+            tensors_list.extend(val[k] for k in keys)
+            metadata.append(
+                (
+                    f.name,
+                    "tensordict",
+                    {"keys": keys, "batch_size": list(val.batch_size)},
+                )
+            )
     return result, tensors_list, metadata
 
 
@@ -594,6 +610,13 @@ def unflatten_dataclass_tensor_fields(
         elif kind == "dict":
             keys = extra if isinstance(extra, list) else []
             result[name] = dict(zip(keys, flat_tensors[idx : idx + len(keys)]))
+            idx += len(keys)
+        elif kind == "tensordict":
+            payload = extra if isinstance(extra, dict) else {}
+            keys = payload.get("keys", [])
+            batch_size = payload.get("batch_size", [])
+            tensor_dict_data = dict(zip(keys, flat_tensors[idx : idx + len(keys)]))
+            result[name] = TensorDict(source=tensor_dict_data, batch_size=batch_size)
             idx += len(keys)
         else:
             raise ValueError(f"Unknown metadata kind for field {name}: {kind}")
