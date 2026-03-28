@@ -9,6 +9,43 @@ from rlinf.scheduler.hardware import AcceleratorType
 from rlinf.scheduler.worker import Worker
 
 
+def _actor_resource_options(
+    accelerator_type: AcceleratorType, request_one: bool
+) -> dict:
+    """Ray scheduling: GPU uses num_gpus; Ascend NPU uses the registered NPU resource."""
+    if not request_one:
+        return {}
+    if accelerator_type == AcceleratorType.NV_GPU:
+        return {"num_gpus": 1}
+    if accelerator_type == AcceleratorType.NPU:
+        return {"resources": {"NPU": 1.0}}
+    return {}
+
+
+def _accel_device_token(accelerator_type: AcceleratorType) -> str:
+    if accelerator_type == AcceleratorType.NV_GPU:
+        return "cuda"
+    if accelerator_type == AcceleratorType.NPU:
+        return "npu"
+    raise ValueError(f"No device token for accelerator type {accelerator_type!r}")
+
+
+def _two_accel_tests_runnable(
+    node0_num_accelerators: int, accelerator_type: AcceleratorType
+) -> bool:
+    if node0_num_accelerators < 2:
+        return False
+    if accelerator_type == AcceleratorType.NV_GPU:
+        return torch.cuda.is_available() and torch.cuda.device_count() >= 2
+    if accelerator_type == AcceleratorType.NPU:
+        return (
+            hasattr(torch, "npu")
+            and torch.npu.is_available()
+            and torch.npu.device_count() >= 2
+        )
+    return False
+
+
 class ActorWithWorker:
     def __init__(
         self,
@@ -47,6 +84,12 @@ class ActorWithWorker:
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             torch.cuda.set_device(local_rank)
             return torch.device("cuda", local_rank)
+        if device == "npu":
+            if not hasattr(torch, "npu") or not torch.npu.is_available():
+                raise RuntimeError("NPU (torch.npu) is not available in this actor.")
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.npu.set_device(local_rank)
+            return torch.device("npu", local_rank)
         raise ValueError(f"Unsupported device: {device}")
 
     def _make_payload(self, kind: str, device: torch.device):
@@ -121,17 +164,19 @@ def main():
         base_group_name_b: str,
         *,
         accelerator_type: str,
-        use_gpu: bool,
+        use_accelerator: bool,
     ):
         # 每个 Ray Actor 所在 group 的 world_size 都是 1，rank 也是 0。
         world_size = 1
-        isolate = use_gpu
+        isolate = use_accelerator
+        accel_enum = AcceleratorType(accelerator_type)
+        res_opts = _actor_resource_options(accel_enum, use_accelerator)
 
         group_name_a = f"{base_group_name_a}_{os.getpid()}_{time.time_ns()}"
         group_name_b = f"{base_group_name_b}_{os.getpid()}_{time.time_ns()}"
 
         actor_a = ActorWithWorkerRemote.options(
-            name=f"{group_name_a}:0", **({} if not use_gpu else {"num_gpus": 1})
+            name=f"{group_name_a}:0", **res_opts
         ).remote(
             group_name=group_name_a,
             rank=0,
@@ -143,7 +188,7 @@ def main():
         )
 
         actor_b = ActorWithWorkerRemote.options(
-            name=f"{group_name_b}:0", **({} if not use_gpu else {"num_gpus": 1})
+            name=f"{group_name_b}:0", **res_opts
         ).remote(
             group_name=group_name_b,
             rank=0,
@@ -154,7 +199,7 @@ def main():
             isolate_accelerator=isolate,
         )
 
-        device = "cuda" if use_gpu else "cpu"
+        device = _accel_device_token(accel_enum) if use_accelerator else "cpu"
         for kind in ["tensor", "tensor_list", "tensor_dict"]:
             # group A(rank 0) -> group B(rank 0)
             r = actor_b.recv_and_check.remote(
@@ -179,25 +224,23 @@ def main():
         "demo_two_groups_cpu_A",
         "demo_two_groups_cpu_B",
         accelerator_type=AcceleratorType.NO_ACCEL.value,
-        use_gpu=False,
+        use_accelerator=False,
     )
 
-    # GPU 测试（可选）
+    # GPU / NPU 测试（可选）：两个 Actor 各占用一块加速器。
     node0 = cluster.get_node_info(0)
-    if (
-        node0.num_accelerators >= 2
-        and torch.cuda.is_available()
-        and torch.cuda.device_count() >= 2
-    ):
+    accel_t = AcceleratorType(node0.accelerator_type)
+    if _two_accel_tests_runnable(node0.num_accelerators, accel_t):
         run_roundtrip_two_groups(
-            "demo_two_groups_gpu_A",
-            "demo_two_groups_gpu_B",
+            "demo_two_groups_accel_A",
+            "demo_two_groups_accel_B",
             accelerator_type=node0.accelerator_type,
-            use_gpu=True,
+            use_accelerator=True,
         )
     else:
         print(
-            "Skip GPU tests: need >=2 GPUs visible (cluster + torch) to run NCCL-style send/recv."
+            "Skip accelerator tests: need >=2 GPUs or >=2 NPUs "
+            "(cluster detection + torch.cuda / torch.npu) for HCCL/NCCL-style send/recv."
         )
 
 

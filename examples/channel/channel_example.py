@@ -18,7 +18,7 @@ class Producer(Worker):
         channel.put("Hello from Producer")
 
         # Synchronous put of tensor
-        tensor = torch.ones(1, device=torch.cuda.current_device())
+        tensor = torch.ones(1, device=self.torch_platform.current_device())
         print(f"producer {tensor=}, {tensor.device=}")
         channel.put(tensor)
 
@@ -87,4 +87,4 @@ res = r1.wait()
 res = r2.wait()
 
 # producer -> channel -> consumer
-# ChannelWorker uses GPU:0 of the node by default: torch.cuda.current_device()
+# ChannelWorker uses GPU:0 of the node by default: Worker.torch_platform.current_device()
