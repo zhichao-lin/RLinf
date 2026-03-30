@@ -7,6 +7,7 @@ from rlinf.scheduler import (
     Cluster,
     PackedPlacementStrategy,
     Channel,
+    AcceleratorUtil,
 )
 
 class Producer(Worker):
@@ -19,7 +20,9 @@ class Producer(Worker):
 
         # Synchronous put of tensor
         tensor = torch.ones(1, device=self.torch_platform.current_device())
-        print(f"producer {tensor=}, {tensor.device=}")
+        visible_devices = AcceleratorUtil.get_visible_devices(Worker.accelerator_type)
+        device_id = visible_devices[self.torch_platform.current_device().index]
+        print(f"producer {tensor=}, {tensor.device=}, {device_id=}")
         channel.put(tensor)
 
         # Asynchronous put of common object
@@ -48,7 +51,9 @@ class Consumer(Worker):
         print(channel.get())
 
         tensor = channel.get()
-        print(f"consumer {tensor=}, {tensor.device=}")
+        visible_devices = AcceleratorUtil.get_visible_devices(Worker.accelerator_type)
+        device_id = visible_devices[self.torch_platform.current_device().index]
+        print(f"consumer {tensor=}, {tensor.device=}, {device_id=}")
 
         async_work = channel.get(async_op=True)
         async_result = async_work.wait()
