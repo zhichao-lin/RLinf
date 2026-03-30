@@ -31,6 +31,7 @@ from rlinf.scheduler import (
     Worker,
 )
 from rlinf.scheduler.channel.channel_worker import ChannelWorker
+from rlinf.scheduler.hardware.accelerators.accelerator import AcceleratorType
 
 # --- Constants ---
 PRODUCER_GROUP_NAME = "producer_group"
@@ -1006,6 +1007,135 @@ class TestChannel:
 
         received = consumer.get_item(channel, False, key=test_key2).wait()[0]
         assert received == test_item2
+
+
+def test_channel_worker_mem_cleaner_cleans_all_visible_devices(monkeypatch):
+    class FakeTorchPlatform:
+        def __init__(self):
+            self._current_device = 0
+            self._alloc = {0: 10, 1: 5}
+            self._reserved = {0: 100, 1: 100}
+            self.empty_cache_calls: list[int] = []
+            self.synchronize_calls: list[int] = []
+            self.set_device_calls: list[int] = []
+
+        def is_initialized(self):
+            return True
+
+        def current_device(self):
+            return self._current_device
+
+        def set_device(self, dev_idx: int):
+            self.set_device_calls.append(dev_idx)
+            self._current_device = dev_idx
+
+        def device_count(self):
+            return 2
+
+        def memory_reserved(self):
+            return self._reserved[self._current_device]
+
+        def memory_allocated(self):
+            return self._alloc[self._current_device]
+
+        def synchronize(self):
+            self.synchronize_calls.append(self._current_device)
+
+        def empty_cache(self):
+            self.empty_cache_calls.append(self._current_device)
+
+    fake_torch_platform = FakeTorchPlatform()
+    monkeypatch.setattr(
+        "rlinf.scheduler.channel.channel_worker.Worker.torch_platform",
+        fake_torch_platform,
+    )
+
+    worker = object.__new__(ChannelWorker)
+    worker._accelerator_type = AcceleratorType.NPU
+    worker.log_debug = lambda *_args, **_kwargs: None
+
+    sleep_calls = 0
+
+    async def _fake_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr("rlinf.scheduler.channel.channel_worker.asyncio.sleep", _fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker._mem_cleaner())
+
+    assert fake_torch_platform.empty_cache_calls == [0, 1]
+    assert fake_torch_platform.synchronize_calls == [0, 1]
+
+
+def test_channel_worker_mem_cleaner_uses_per_device_threshold(monkeypatch):
+    class FakeTorchPlatform:
+        def __init__(self):
+            self._current_device = 0
+            self._reserved = {0: 100, 1: 100}
+            self._allocated_before = {0: 10, 1: 30}
+            self._allocated_after = {0: 20, 1: 30}
+            self._phase = "before"
+            self.empty_cache_calls: list[int] = []
+            self.synchronize_calls: list[int] = []
+
+        def is_initialized(self):
+            return True
+
+        def current_device(self):
+            return self._current_device
+
+        def set_device(self, dev_idx: int):
+            self._current_device = dev_idx
+
+        def device_count(self):
+            return 2
+
+        def memory_reserved(self):
+            return self._reserved[self._current_device]
+
+        def memory_allocated(self):
+            if self._phase == "before":
+                return self._allocated_before[self._current_device]
+            return self._allocated_after[self._current_device]
+
+        def synchronize(self):
+            self.synchronize_calls.append(self._current_device)
+
+        def empty_cache(self):
+            self.empty_cache_calls.append(self._current_device)
+            self._phase = "after"
+
+    fake_torch_platform = FakeTorchPlatform()
+    monkeypatch.setattr(
+        "rlinf.scheduler.channel.channel_worker.Worker.torch_platform",
+        fake_torch_platform,
+    )
+
+    worker = object.__new__(ChannelWorker)
+    worker._accelerator_type = AcceleratorType.NPU
+    worker.log_debug = lambda *_args, **_kwargs: None
+
+    sleep_calls = 0
+
+    async def _fake_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr("rlinf.scheduler.channel.channel_worker.asyncio.sleep", _fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker._mem_cleaner())
+
+    # device0 cleans first: threshold becomes 0.2.
+    # device1 current util is 0.3 and should still be cleaned with its own default 0.4.
+    assert fake_torch_platform.empty_cache_calls == [0, 1]
+    assert fake_torch_platform.synchronize_calls == [0, 1]
 
 
 if __name__ == "__main__":

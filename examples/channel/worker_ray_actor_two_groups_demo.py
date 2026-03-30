@@ -5,7 +5,7 @@ import ray
 import torch
 
 from rlinf.scheduler.cluster import Cluster
-from rlinf.scheduler.hardware import AcceleratorType
+from rlinf.scheduler.hardware import AcceleratorType, AcceleratorUtil
 from rlinf.scheduler.worker import Worker
 
 
@@ -65,7 +65,7 @@ class ActorWithWorker:
             world_size=world_size,
             cluster_node_rank=cluster_node_rank,
             node_group_label=node_group_label,
-            accelerator_type=accel_type,
+            accelerator_type=accelerator_type,
             accelerator_model="",
             local_accelerator_rank=local_acc_rank,
             node_local_rank=0,
@@ -114,6 +114,12 @@ class ActorWithWorker:
         payload = self._make_payload(kind, dev)
         self._worker.send(payload, dst_group_name=dst_group_name, dst_rank=dst_rank)
 
+        logic_id = None
+        if dev != torch.device('cpu'):
+            visible_devices = AcceleratorUtil.get_visible_devices(self._worker.accelerator_type)
+            logic_id = visible_devices[dev.index]
+        return f"send(kind={kind}, device={device}, logic_id={logic_id})"
+
     def recv_and_check(
         self, src_group_name: str, src_rank: int, *, device: str, kind: str
     ) -> str:
@@ -143,7 +149,11 @@ class ActorWithWorker:
         else:
             raise ValueError(f"Unsupported kind: {kind}")
 
-        return f"ok(kind={kind}, device={device})"
+        logic_id = None
+        if dev != torch.device('cpu'):
+            visible_devices = AcceleratorUtil.get_visible_devices(self._worker.accelerator_type)
+            logic_id = visible_devices[dev.index]
+        return f"ok(kind={kind}, device={device}, logic_id={logic_id})"
 
 
 ActorWithWorkerRemote = ray.remote(ActorWithWorker)
@@ -205,18 +215,20 @@ def main():
             r = actor_b.recv_and_check.remote(
                 src_group_name=group_name_a, src_rank=0, device=device, kind=kind
             )
-            actor_a.send_payload.remote(
+            s = actor_a.send_payload.remote(
                 dst_group_name=group_name_b, dst_rank=0, device=device, kind=kind
             )
+            print("[A->B]", ray.get(s))
             print("[A->B]", ray.get(r))
 
             # group B(rank 0) -> group A(rank 0)
             r = actor_a.recv_and_check.remote(
                 src_group_name=group_name_b, src_rank=0, device=device, kind=kind
             )
-            actor_b.send_payload.remote(
+            s = actor_b.send_payload.remote(
                 dst_group_name=group_name_a, dst_rank=0, device=device, kind=kind
             )
+            print("[B->A]", ray.get(s))
             print("[B->A]", ray.get(r))
 
     # CPU 测试（必跑）

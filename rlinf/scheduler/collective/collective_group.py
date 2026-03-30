@@ -1314,6 +1314,12 @@ class CollectiveGroup:
         )
         tensor_handles = self._tensor_to_object(handles_tensor, handles_tensor_size)
 
+        # device index of sender and receiver might be different, but they point to the same device
+        for i, (rebuild_func, rebuild_args) in enumerate(tensor_handles):
+            if len(rebuild_args) == 15:
+                new_args = list(rebuild_args)
+                new_args[6] = Worker.torch_platform.current_device()
+                tensor_handles[i] = (rebuild_func, new_args)
         remote_tensors = [
             rebuild_func(*rebuild_args)
             for (rebuild_func, rebuild_args) in tensor_handles
