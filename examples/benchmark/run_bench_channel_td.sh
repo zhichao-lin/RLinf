@@ -5,7 +5,7 @@ set -euo pipefail
 DELAY_HOURS=0
 DELAY_SECONDS=$(awk -v h="$DELAY_HOURS" 'BEGIN{print h * 3600}')
 
-echo " Current time: $(data + "%Y-%m-%d %H:%M:%S")"
+echo " Current time: $(date +"%Y-%m-%d %H:%M:%S")"
 echo " Will run after ${DELAY_HOURS} hours (${DELAY_SECONDS} seconds)"
 
 sleep ${DELAY_SECONDS}
