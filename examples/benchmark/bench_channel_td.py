@@ -46,6 +46,8 @@ PAYLOAD_TYPES = frozenset(
 # Size units (binary: 1024-based)
 _SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
 
+USE_WALL_TIME = True
+
 
 def resolve_worker_ranks(placement: str) -> tuple[int, int]:
     if placement == "same":
@@ -192,7 +194,7 @@ class Producer(Worker):
     def warmup(self, channel: Channel, cfg: BenchmarkConfig, async_mode: bool) -> None:
         """Un-timed warmup for puts to build up channel state and JITs."""
         device = torch.device(_resolve_device(cfg.payload_device))
-        payload = torch.randn(1, dtype=torch.float32, device=device)
+        payload = torch.randn(1, dtype=torch.float32, device=device).contiguous()
         if async_mode:
 
             async def _warmup() -> None:
@@ -392,19 +394,26 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
         if ray_queue is None:
             return None
         reset_ray_queue()
+        start_wall = time.perf_counter()
         if async_mode:
             prod_res = producer_group.run_async_ray_queue(ray_queue, cfg)
         else:
             prod_res = producer_group.run_sync_ray_queue(ray_queue, cfg)
-        put_time = prod_res.wait()[0]
+        prod_time = prod_res.wait()[0]
+        put_wall = time.perf_counter() - start_wall
 
         time.sleep(2)
 
+        start_wall = time.perf_counter()
         if async_mode:
             cons_res = consumer_group.run_async_ray_queue(ray_queue, cfg)
         else:
             cons_res = consumer_group.run_sync_ray_queue(ray_queue, cfg)
-        get_time = cons_res.wait()[0]
+        cons_time = cons_res.wait()[0]
+        get_wall = time.perf_counter() - start_wall
+
+        put_time = put_wall if USE_WALL_TIME else prod_time
+        get_time = get_wall if USE_WALL_TIME else cons_time
         payload_size_gb = cfg.payload_size / float(_SIZE_UNITS["GB"])
         total_data_size_gb = payload_size_gb * float(cfg.num_messages)
         put_gbit_per_sec = (
@@ -421,8 +430,10 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
         return {
             "payload_size_gb": payload_size_gb,
             "total_data_size_gb": total_data_size_gb,
-            "put_time": put_time,
-            "get_time": get_time,
+            "put_time": prod_time,
+            "get_time": cons_time,
+            "put_wall": put_wall,
+            "get_wall": get_wall,
             "put_gbit_per_sec": put_gbit_per_sec,
             "get_gbit_per_sec": get_gbit_per_sec,
             "total_gbit_per_sec": total_gbit_per_sec,
@@ -435,20 +446,26 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
         producer_group.warmup(channel, cfg, async_mode).wait()
         consumer_group.warmup(channel, cfg, async_mode).wait()
 
+        start_wall = time.perf_counter()
         if async_mode:
             prod_res = producer_group.run_async(channel, cfg)
         else:
             prod_res = producer_group.run_sync(channel, cfg)
-        put_time = prod_res.wait()[0]
+        prod_time = prod_res.wait()[0]
+        put_wall = time.perf_counter() - start_wall
 
         time.sleep(2)
 
+        start_wall = time.perf_counter()
         if async_mode:
             cons_res = consumer_group.run_async(channel, cfg)
         else:
             cons_res = consumer_group.run_sync(channel, cfg)
-        get_time = cons_res.wait()[0]
+        cons_time = cons_res.wait()[0]
+        get_wall = time.perf_counter() - start_wall
 
+        put_time = put_wall if USE_WALL_TIME else prod_time
+        get_time = get_wall if USE_WALL_TIME else cons_time
         payload_size_gb = cfg.payload_size / float(_SIZE_UNITS["GB"])
         total_data_size_gb = payload_size_gb * float(cfg.num_messages)
         put_gbit_per_sec = (
@@ -465,8 +482,10 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
         return {
             "payload_size_gb": payload_size_gb,
             "total_data_size_gb": total_data_size_gb,
-            "put_time": put_time,
-            "get_time": get_time,
+            "put_time": prod_time,
+            "get_time": cons_time,
+            "put_wall": put_wall,
+            "get_wall": get_wall,
             "put_gbit_per_sec": put_gbit_per_sec,
             "get_gbit_per_sec": get_gbit_per_sec,
             "total_gbit_per_sec": total_gbit_per_sec,
@@ -559,6 +578,8 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
             f"total_data={s['total_data_size_gb']:.6f} GB, "
             f"put_time={s['put_time']:.4f}s, "
             f"get_time={s['get_time']:.4f}s, "
+            f"put_wall={s['put_wall']:.4f}s, "
+            f"get_wall={s['get_wall']:.4f}s, "
             f"put={s['put_gbit_per_sec']:.3f} Gbit/s, "
             f"get={s['get_gbit_per_sec']:.3f} Gbit/s, "
             f"total={s['total_gbit_per_sec']:.3f} Gbit/s"
@@ -576,6 +597,8 @@ def run_benchmark(cfg: BenchmarkConfig) -> None:
             "total_data_size_gb",
             "put_time",
             "get_time",
+            "put_wall",
+            "get_wall",
             "put_gbit_per_sec",
             "get_gbit_per_sec",
             "total_gbit_per_sec",

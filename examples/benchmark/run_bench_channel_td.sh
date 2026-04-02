@@ -40,6 +40,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 TIMESTAMP="$(date +"%Y%m%d_%H%M%S")"
 LOG_FILE="${LOG_DIR}/bench_channel_td_${DESC_NAME}_${TIMESTAMP}.log"
 STATS_JSON="${LOG_DIR}/bench_channel_td_${DESC_NAME}_${TIMESTAMP}.json"
+NUM_RETRY="${NUM_RETRY:-3}"
 echo "Log file: ${LOG_FILE}"
 echo "Stats JSON: ${STATS_JSON}"
 echo
@@ -85,7 +86,9 @@ run_one() {
       continue
     fi
 
+    echo "=========================================================================================================="
     echo "Running bench_channel_td.py with desc='${desc}', placement='${placement}'"
+    echo "=========================================================================================================="
     echo
 
     set -x
@@ -94,17 +97,32 @@ run_one() {
       if [[ "${dev}" == "npu" ]]; then
         # NPU may be unavailable; do not fail the whole script.
         set +e
-        "${PYTHON_BIN}" "${SCRIPT_DIR}/bench_channel_td.py" \
-          --desc "${desc}" \
-          --placement "${placement}" \
-          "$@" \
-          --stats-json-path "${STATS_JSON}" \
-          --payload-device "${dev}"
-        rc=$?
+        attempt=0
+        rc=0
+        while true; do
+          "${PYTHON_BIN}" "${SCRIPT_DIR}/bench_channel_td.py" \
+            --desc "${desc}" \
+            --placement "${placement}" \
+            "$@" \
+            --stats-json-path "${STATS_JSON}" \
+            --payload-device "${dev}"
+          rc=$?
+          if [[ $rc -eq 0 ]]; then
+            break
+          fi
+          attempt=$((attempt + 1))
+          if [[ $attempt -gt ${NUM_RETRY} ]]; then
+            echo "================================================================================"
+            echo "  [WARN] npu run failed with exit code ${rc} after ${NUM_RETRY} retries, continue."
+            echo "================================================================================"
+            break
+          else
+            echo "================================================================================"
+            echo "  [WARN] npu run failed with exit code ${rc}, retry ${attempt}/${NUM_RETRY}..."
+            echo "================================================================================"
+          fi
+        done
         set -e
-        if [[ $rc -ne 0 ]]; then
-          echo "  [WARN] npu run failed with exit code ${rc}, continue."
-        fi
       else
         "${PYTHON_BIN}" "${SCRIPT_DIR}/bench_channel_td.py" \
           --desc "${desc}" \
