@@ -443,8 +443,9 @@ class Worker(metaclass=WorkerMeta):
 
         # Reset Cluster.NAMESPACE for this Worker process according to the environment variable
         namespace = os.environ.get("CLUSTER_NAMESPACE", None)
-        assert namespace is not None, (
-            "CLUSTER_NAMESPACE environment variable must be set before initializing Worker."
+        if "NO_NAMESPACE" not in os.environ:
+            assert namespace is not None, (
+                "CLUSTER_NAMESPACE environment variable must be set before initializing Worker."
         )
         Cluster.NAMESPACE = namespace
 
@@ -615,8 +616,8 @@ class Worker(metaclass=WorkerMeta):
 
         worker_address = WorkerAddress(group_name, rank)
 
-        # Namespace must be set before Worker.__init__ is executed.
-        os.environ["CLUSTER_NAMESPACE"] = Cluster.NAMESPACE
+        if "NO_NAMESPACE" not in os.environ:
+            os.environ["CLUSTER_NAMESPACE"] = Cluster.NAMESPACE
 
         # Only set core distributed envs if they are not already configured.
         env_defaults: dict[str, str] = {
@@ -1339,8 +1340,12 @@ class Worker(metaclass=WorkerMeta):
             try:
                 self._actor = ray.get_actor(self._worker_name, namespace=Cluster.NAMESPACE)
             except ValueError:
-                self._logger.warning(f"Worker {self._worker_name} not found, using current actor")
-                self._actor = ray.get_runtime_context().current_actor
+                ctx = ray.get_runtime_context()
+                if ctx.get_actor_id() is not None:
+                    self._logger.warning(f"Worker {self._worker_name} not found, using current actor")
+                    self._actor = ray.get_runtime_context().current_actor
+                else:
+                    self._logger.warning(f"Worker {self._worker_name} is not ray actor")
 
         node_ip = ray.util.get_node_ip_address()
 

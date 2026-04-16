@@ -78,7 +78,7 @@ class Cluster:
     """A singleton class that manages the cluster resources for Ray workers."""
 
     SYS_NAME = "RLinf"
-    NAMESPACE = SYS_NAME
+    NAMESPACE = None if "NO_NAMESPACE" in os.environ else SYS_NAME
     LOGGING_LEVEL = os.getenv(
         f"{SYS_NAME.upper()}_{ClusterEnvVar.LOG_LEVEL.value}", "INFO"
     ).upper()
@@ -122,6 +122,7 @@ class Cluster:
         cluster_cfg: Optional[DictConfig] = None,
         distributed_log_dir: Optional[str] = None,
         ray_init_kwargs: Optional[dict] = None,
+        no_init_ray: Optional[bool] = False,
     ):
         """Initialize the cluster.
 
@@ -129,11 +130,19 @@ class Cluster:
             num_nodes (int): The number of nodes in the cluster. When you wish to acquire the cluster instance in a processes other than the main driver process, do not pass this argument. Instead, use the `Cluster()` constructor without arguments. If num_nodes is 0, it will initialize the cluster with all ray-connected nodes.
             cluster_cfg (Optional[DictConfig]): The cluster's configuration dictionary. If set, num_nodes will be ignored and inferred from the config.
             distributed_log_dir (Optional[str]): Output directory for split logs. This must be provided when ``distributed_logging`` is True.
+            ray_init_kwargs (Optional[dict]): Keyword arguments for ray.init.
+            no_init_ray (Optional[bool]): Whether to not initialize ray.
         """
         if self._has_initialized:
             return
         self._setup_logger()
         self._distributed_log_collector: Optional[DistributedRayLogCollector] = None
+
+        if no_init_ray:
+            self._launch_managers(num_nodes=0, cluster_cfg=None, distributed_log_dir=distributed_log_dir)
+            self._has_initialized = True
+            return
+
         if num_nodes is not None or cluster_cfg is not None:
             self._ray_instance_count = 0
             while True:
@@ -177,34 +186,13 @@ class Cluster:
         )
         handler.setFormatter(formatter)
         self._logger.addHandler(handler)
-
-    def _init_and_launch_managers(
+    
+    def _launch_managers(
         self,
         num_nodes: int,
         cluster_cfg: Optional[DictConfig],
         distributed_log_dir: Optional[str],
-        ray_init_kwargs: Optional[dict] = None,
     ):
-        if ray.is_initialized():
-            if self._ray_instance_count > 0:
-                # For reinit Ray to switch namespace
-                ray.shutdown()
-            else:
-                # Initializing Ray before us interferes with the namespace and logging level settings.
-                raise RuntimeError(
-                    "You have initialized Ray before creating the Cluster instance. This may be due to calling ray.init or creating certain Ray objects like Ray Queue before instantiating the Cluster class. Please ensure that the Cluster class is instantiated before Ray is initialized because it will interfere with our Ray namespace and logging settings."
-                )
-
-        # NOTE: Add os.environ variables to the worker environment.
-        # When ray cluster has been started via `ray start` before running the Python script, ray will only capture the environment variables exported before `ray start` and ignore all subsequently exported environment variables.
-        # To handle this, we need to manually pass the environment variables to Ray when initializing the cluster.
-        # Any env vars conflicting with Worker env vars will be overwritten by Worker.
-        if "RAY_DEDUP_LOGS" not in os.environ:
-            # Default disabling deduplication of logs to ensure all logs are printed.
-            ray_logging.RAY_DEDUP_LOGS = 0
-        if "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO" not in os.environ:
-            os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
-
         # Cluster configurations
         self._cluster_cfg = (
             ClusterConfig.from_dict_cfg(cluster_cfg) if cluster_cfg else None
@@ -221,21 +209,6 @@ class Cluster:
             self._cluster_cfg.num_nodes if self._cluster_cfg is not None else num_nodes
         )
         assert self._num_nodes >= 0, "num_nodes must be greater than or equal to 0."
-
-        try:
-            # First try to connect to an existing Ray cluster
-            ray.init(
-                address="auto",
-                logging_level=Cluster.LOGGING_LEVEL,
-                namespace=Cluster.NAMESPACE,
-                **(ray_init_kwargs or {}),
-            )
-        except ConnectionError:
-            ray.init(
-                logging_level=Cluster.LOGGING_LEVEL,
-                namespace=Cluster.NAMESPACE,
-                **(ray_init_kwargs or {}),
-            )
 
         # Ray log collector
         if distributed_log_dir is not None:
@@ -322,12 +295,10 @@ class Cluster:
                 self._distributed_log_collector.stop()
 
             with without_http_proxies():
-                alive_actors = list_actors(
-                    filters=[
-                        ("STATE", "=", "ALIVE"),
-                        ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
-                    ]
-                )
+                filters = [("STATE", "=", "ALIVE")]
+                if Cluster.NAMESPACE is not None:
+                    filters.append(("RAY_NAMESPACE", "=", Cluster.NAMESPACE))
+                alive_actors = list_actors(filters=filters)
             for actor_state in alive_actors:
                 actor = ray.get_actor(actor_state.name)
                 ray.kill(actor, no_restart=True)
@@ -340,6 +311,50 @@ class Cluster:
             exit(-1)
 
         signal.signal(signal.SIGUSR1, signal_handler)
+
+    def _init_and_launch_managers(
+        self,
+        num_nodes: int,
+        cluster_cfg: Optional[DictConfig],
+        distributed_log_dir: Optional[str],
+        ray_init_kwargs: Optional[dict] = None,
+    ):
+        if ray.is_initialized():
+            if self._ray_instance_count > 0:
+                # For reinit Ray to switch namespace
+                ray.shutdown()
+            else:
+                # Initializing Ray before us interferes with the namespace and logging level settings.
+                raise RuntimeError(
+                    "You have initialized Ray before creating the Cluster instance. This may be due to calling ray.init or creating certain Ray objects like Ray Queue before instantiating the Cluster class. Please ensure that the Cluster class is instantiated before Ray is initialized because it will interfere with our Ray namespace and logging settings."
+                )
+
+        # NOTE: Add os.environ variables to the worker environment.
+        # When ray cluster has been started via `ray start` before running the Python script, ray will only capture the environment variables exported before `ray start` and ignore all subsequently exported environment variables.
+        # To handle this, we need to manually pass the environment variables to Ray when initializing the cluster.
+        # Any env vars conflicting with Worker env vars will be overwritten by Worker.
+        if "RAY_DEDUP_LOGS" not in os.environ:
+            # Default disabling deduplication of logs to ensure all logs are printed.
+            ray_logging.RAY_DEDUP_LOGS = 0
+        if "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO" not in os.environ:
+            os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
+
+        try:
+            # First try to connect to an existing Ray cluster
+            ray.init(
+                address="auto",
+                logging_level=Cluster.LOGGING_LEVEL,
+                namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
+            )
+        except ConnectionError:
+            ray.init(
+                logging_level=Cluster.LOGGING_LEVEL,
+                namespace=Cluster.NAMESPACE,
+                **(ray_init_kwargs or {}),
+            )
+
+        self._launch_managers(num_nodes, cluster_cfg, distributed_log_dir)
 
     def _init_from_existing_managers(self):
         if not ray.is_initialized():
